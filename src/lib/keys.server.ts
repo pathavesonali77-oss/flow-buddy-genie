@@ -6,32 +6,40 @@
  * with AGNES_API_KEY accepted as a first key too). Keys are read only here, on
  * the server, and are never sent to the browser or written into the codebase.
  *
- * Agnes' Cloudflare edge applies the 20 RPM limit to the shared caller, not
- * independently to each credential. Every image request therefore passes
- * through one process-wide, sequential 20 RPM gate. Keys still rotate so an
- * exhausted or invalid credential does not pin every later panel to one key.
+ * WHY THIS FILE NO LONGER WAITS
+ * -----------------------------
+ * The previous version held a per-key "lane" in module memory: a lease, a
+ * rolling-minute counter and a 20s spacing rule, with a `for(;;) await sleep()`
+ * loop that blocked a request until a lane opened.
+ *
+ * That works in a single long-lived dev process and fails on live hosting,
+ * because live hosting runs each server call in its own short-lived isolate:
+ *
+ *   - Isolate A's lane map knows nothing about isolate B's, so the "shared"
+ *     budget was never actually shared and never actually enforced.
+ *   - An isolate torn down mid-request never runs its `finally`, so its lease
+ *     leaked. A reused warm isolate then had every lane marked busy by jobs
+ *     that no longer existed, and the waiting loop spun forever inside a live
+ *     request — the freeze after the first handful of images.
+ *
+ * Measured against the real provider, nine keys sustain nine parallel renders
+ * with no 429 at all, so the elaborate gate was protecting against a limit that
+ * does not bite. Key choice is now a pure, instant function of the slot the
+ * browser assigns. Nothing here ever blocks; a key that genuinely reports a
+ * throttle is skipped for a short while, never waited on.
  */
 
-import { assertActive, registerKillHook } from "./kill-switch.server";
+import { assertActive } from "./kill-switch.server";
 
-
-/** Hard provider ceiling per key, per rolling minute. */
+/** Hard provider ceiling per key, per rolling minute (documented, not enforced here). */
 export const IMAGE_RPM = 20;
-/** Rolling window length. */
-const WINDOW_MS = 60_000;
+
 /**
- * Self-imposed ceiling per key: after every generation a key rests
- * COOLDOWN_PER_KEY_MS (20s) before its next request, capping each key at
- * 3 per minute — far under the provider's 20 per minute, so it never trips.
+ * How many panels the browser may draw at once. The browser owns this limit
+ * because it is the only participant that sees the whole run; the server side
+ * cannot, since each call may land in a different isolate.
  */
-const COOLDOWN_PER_KEY_MS = 20_000;
-const SAFE_RPM = 3;
-/** Minimum gap between two starts on the SAME key: a flat 20 seconds. */
-const SPACING_MS = COOLDOWN_PER_KEY_MS;
-
-/** Live-safe client ceiling; key count is for rotation, not parallel requests. */
-export const IMAGE_CONCURRENCY = 3;
-
+export const IMAGE_CONCURRENCY = 6;
 
 /** All configured Agnes keys, in order. */
 export function agnesKeys(): string[] {
@@ -62,124 +70,63 @@ export function agnesKey(): string {
   return agnesKeys()[0] as string;
 }
 
-/**
- * `busyUntil` is a LEASE, not a flag.
- *
- * A boolean `busy` is only ever cleared by the `finally` of the job that set
- * it. When that job's request is torn down mid-flight (Insta Kill, a refresh,
- * a serverless handler the platform drops) the `finally` may never run, so the
- * key stays "busy" forever. Once every key has leaked that way, the waiting
- * loop below spins with nothing to give out and generation hangs with no error
- * at all. A lease simply expires: a key can never be lost.
- */
-type Lane = { starts: number[]; busyUntil: number; cooldownUntil: number };
-
-/** Longest one image request can hold a key (the 180s call plus slack). */
-const LEASE_MS = 240_000;
-
-/** One independent lane per key: each key draws its own image in parallel. */
-const lanes = new Map<string, Lane>();
-
-function laneFor(key: string): Lane {
-  let l = lanes.get(key);
-  if (!l) {
-    l = { starts: [], busyUntil: 0, cooldownUntil: 0 };
-    lanes.set(key, l);
-  }
-  return l;
-}
-
-const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
-
-/** True when this key may start a request right now. */
-function laneReady(l: Lane, now: number): boolean {
-  l.starts = l.starts.filter((t) => now - t < WINDOW_MS);
-  if (now < l.busyUntil) return false;
-  if (now < l.cooldownUntil) return false;
-  const last = l.starts.length ? (l.starts[l.starts.length - 1] as number) : 0;
-  if (now - last < SPACING_MS) return false;
-  return l.starts.length < SAFE_RPM;
-}
-
-
-/** Round-robin cursor so load spreads evenly across the keys. */
-let cursor = 0;
-
 /** Stable first lane for a job, including when every request gets a fresh isolate. */
 export function imageKeyStartIndex(slot: number, attempt: number, keyCount: number): number {
   if (keyCount <= 0) return 0;
-  return ((slot + attempt) % keyCount + keyCount) % keyCount;
+  return (((slot + attempt) % keyCount) + keyCount) % keyCount;
 }
 
 /**
- * Parks ONLY the key that actually hit 429/1015.
- *
- * This used to read a module-global "last leased key", which is wrong the
- * moment more than one image is in flight: whichever lease happened most
- * recently was blamed for a throttle raised by a different key. The throttled
- * key stayed hot (so it was picked again immediately and throttled again) and a
- * perfectly healthy key was parked — the stuck / resume / stuck cycle. The
- * caller now passes the exact key it used, so the cooldown always lands on it.
+ * Keys that answered with a throttle recently, with the moment they may be
+ * tried again. Best-effort only: it is process-local, it is consulted to SKIP a
+ * key, and it can never make a request wait. If every key is resting the
+ * preferred key is used anyway — a fast 429 that the browser retries is always
+ * better than a request that hangs.
  */
+const restingUntil = new Map<string, number>();
+
+/** Parks ONLY the key that actually hit 429 / Cloudflare 1015. */
 export function reportImageRateLimit(key: string, retryAfterMs = 15_000): void {
   if (!key) return;
-  const l = laneFor(key);
-  l.cooldownUntil = Math.max(l.cooldownUntil, Date.now() + Math.max(1_000, retryAfterMs));
+  restingUntil.set(key, Date.now() + Math.max(1_000, Math.min(60_000, retryAfterMs)));
 }
 
-/** Insta Kill hands every key back: nothing is drawing any more. */
+/** Insta Kill: forget every cooldown, nothing is drawing any more. */
 export function releaseAllImageKeys(): void {
-  for (const lane of lanes.values()) {
-    lane.busyUntil = 0;
-    lane.cooldownUntil = 0;
-    lane.starts = [];
-  }
+  restingUntil.clear();
 }
-
-registerKillHook(releaseAllImageKeys);
 
 /**
- * Leases a free key and runs the request on it. The browser owns the live-safe
- * shared concurrency ceiling because this process-local map resets whenever
- * production requests land in separate isolates. Keys rotate for resilience.
+ * Picks a key and runs the request on it — immediately, always.
+ *
+ * `slot` is assigned by the browser and increments per panel, so consecutive
+ * panels land on consecutive keys even when every call runs in its own isolate.
+ * `attempt` shifts to the next key on a retry, so a bad credential cannot pin a
+ * panel to itself.
  */
 export async function withImageKey<T>(
   slot: number,
   attempt: number,
   fn: (key: string, keyIndex: number) => Promise<T>,
 ): Promise<T> {
+  assertActive();
   const keys = agnesKeys();
-  let chosen = -1;
-  for (;;) {
-    // A killed or abandoned run stops waiting for a key instead of spinning
-    // here silently for the rest of the process's life.
-    assertActive();
-    const now = Date.now();
-    // Serverless requests frequently execute in separate isolates. In that
-    // case every isolate has a fresh cursor (zero), so cursor-only selection
-    // sends all first-wave jobs to key 1. Use the browser-assigned slot as the
-    // stable starting lane, then move on each retry. The local cursor remains a
-    // tie-breaker when several requests share one isolate.
-    const preferred = imageKeyStartIndex(slot, attempt, keys.length);
-    for (let i = 0; i < keys.length; i++) {
-      const idx = (preferred + cursor + i) % keys.length;
-      const candidate = keys[idx] as string;
-      if (laneReady(laneFor(candidate), now)) {
-        chosen = idx;
-        cursor = (cursor + 1) % keys.length;
-        break;
-      }
+  const preferred = imageKeyStartIndex(slot, attempt, keys.length);
+  const now = Date.now();
+
+  // Walk from the preferred key and take the first one that is not resting.
+  // If they are all resting, fall back to the preferred one rather than wait.
+  let chosen = preferred;
+  for (let i = 0; i < keys.length; i++) {
+    const idx = (preferred + i) % keys.length;
+    const candidate = keys[idx] as string;
+    const rest = restingUntil.get(candidate) ?? 0;
+    if (rest <= now) {
+      if (rest) restingUntil.delete(candidate);
+      chosen = idx;
+      break;
     }
-    if (chosen >= 0) break;
-    await sleep(250);
   }
-  const key = keys[chosen] as string;
-  const lane = laneFor(key);
-  lane.busyUntil = Date.now() + LEASE_MS;
-  lane.starts.push(Date.now());
-  try {
-    return await fn(key, chosen);
-  } finally {
-    lane.busyUntil = 0;
-  }
+
+  return fn(keys[chosen] as string, chosen);
 }
