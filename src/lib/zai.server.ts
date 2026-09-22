@@ -90,8 +90,16 @@ const MIN_GAP_MS = 2_000;
  * the next script sat on "Reading script…" with nothing happening. A lease
  * expires by itself, and polling waiters cannot lose a wake-up.
  */
-/** Longest one text call may hold the slot before it is reclaimed. */
-const MAX_HOLD_MS = 300_000;
+/**
+ * Longest one text call may hold the slot before it is reclaimed.
+ *
+ * Kept short on purpose: this gate lives in per-instance memory, so a request
+ * the live host tears down mid-flight leaks its hold. Every later text call
+ * then polls for up to this long before the lease expires by itself, which the
+ * user sees as writing that has stalled for no reason. A live call renews its
+ * hold while it is genuinely working, so nothing healthy is cut short.
+ */
+const MAX_HOLD_MS = 120_000;
 /** 0 = free. Otherwise the moment the current holder's lease runs out. */
 let slotBusyUntil = 0;
 
