@@ -29,7 +29,7 @@
  * throttle is skipped for a short while, never waited on.
  */
 
-import { assertActive } from "./kill-switch.server";
+import { assertActive, registerKillHook } from "./kill-switch.server";
 
 /** Hard provider ceiling per key, per rolling minute (documented, not enforced here). */
 export const IMAGE_RPM = 20;

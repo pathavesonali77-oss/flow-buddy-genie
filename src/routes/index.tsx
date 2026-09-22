@@ -116,11 +116,16 @@ const PROMPT_RANGE = 15;
  * (agnes-image-2.5-flash). Live hosting can place each server call in a fresh
  * isolate, so server-memory leases cannot enforce a shared concurrency limit.
  * Keep the authoritative limit here, where one browser owns the whole run.
+ *
+ * Six at a time with a short start gap: the nine keys were measured drawing
+ * nine panels simultaneously with no rate limiting at all, so the old
+ * three-at-a-time / four-second-gap pacing was throttling the run roughly ten
+ * times harder than the provider ever asked for.
  */
-const IMAGE_CONCURRENCY = 3;
+const IMAGE_CONCURRENCY = 6;
 const IMAGE_BATCH = 1;
 /** Pace starts as well as limiting in-flight work, avoiding shared-edge 1015 bursts. */
-const IMAGE_START_GAP_MS = 4_000;
+const IMAGE_START_GAP_MS = 800;
 /**
  * The server already downloads and validates every finished image (complete
  * file + entropy) before returning its URL, so re-downloading and decoding it
