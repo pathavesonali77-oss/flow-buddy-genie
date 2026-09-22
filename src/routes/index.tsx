@@ -219,8 +219,16 @@ async function killable<T>(
 ): Promise<T> {
   const controller = new AbortController();
   const untrack = trackRequest(controller);
+  // The reason deliberately reads as an ordinary failure, NOT as a
+  // cancellation. A live host that severs a long request leaves the page
+  // waiting on an answer that will never come; hitting this deadline must put
+  // the panel back on the queue, and must never be mistaken for Insta Kill
+  // (which stops the whole run and empties the queue).
   const timer = timeoutMs
-    ? window.setTimeout(() => controller.abort("request timed out"), timeoutMs)
+    ? window.setTimeout(
+        () => controller.abort(new Error(DEADLINE_MESSAGE)),
+        timeoutMs,
+      )
     : undefined;
   try {
     return await run(controller.signal);
@@ -229,6 +237,9 @@ async function killable<T>(
     untrack();
   }
 }
+
+/** Wording of a deadline failure; kept out of the cancellation patterns below. */
+const DEADLINE_MESSAGE = "no answer from the server in time";
 
 /**
  * Insta Kill (and a superseded run, a closed tab, a timed-out request) is a
