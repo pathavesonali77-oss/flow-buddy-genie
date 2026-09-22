@@ -276,10 +276,15 @@ function useSwallowCancellations() {
 }
 
 /**
- * Practically no ceiling: a drawing round trip is left alone until it answers.
- * The old eight-minute cut-off was throwing away healthy renders.
+ * Hard ceiling on ONE drawing round trip.
+ *
+ * The server gives up on a panel after ~110s and answers with a plain failure,
+ * so anything still silent at 150s is a connection the live host has quietly
+ * severed — an answer that is never coming. The previous six-HOUR ceiling meant
+ * exactly that case stalled the run until the user gave up. At 150s the panel
+ * simply goes back on the queue and is drawn again.
  */
-const IMAGE_REQUEST_DEADLINE_MS = 6 * 60 * 60_000;
+const IMAGE_REQUEST_DEADLINE_MS = 150_000;
 
 async function getPrompts(input: PromptRequest): Promise<{ prompts: string[] }> {
   const label = `${input.from}-${input.to}`;
