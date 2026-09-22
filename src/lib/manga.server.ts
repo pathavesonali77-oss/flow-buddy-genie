@@ -2430,11 +2430,17 @@ export async function renderPanel(
     );
 
 
+  // Every stage below stops the moment this request's own budget runs out, so
+  // the handler always answers the browser instead of being severed mid-ladder.
+  const deadline = Date.now() + RENDER_BUDGET_MS;
+  const outOfTime = () => Date.now() >= deadline;
+
   // Stage 1 — the prompt exactly as written, retried in full on fresh seeds and
-  // fresh keys. Each round itself retries inside generateImage, so a busy or
-  // flaky renderer is worked through instead of failing the panel.
+  // fresh keys, for as long as this request's budget allows. Anything beyond
+  // that is the browser's job: it re-queues the panel with a fresh seed and key.
   let refused = false;
   for (let round = 0; round < 3; round++) {
+    if (round > 0 && outOfTime()) break;
     tries++;
     try {
       const url = await generateImage(
@@ -2442,7 +2448,7 @@ export async function renderPanel(
         seed + round * 1861,
         slot + round,
         bible,
-        3,
+        1,
         line,
         continuity,
         plan,
