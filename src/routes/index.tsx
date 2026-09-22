@@ -242,19 +242,22 @@ async function killable<T>(
 const DEADLINE_MESSAGE = "no answer from the server in time";
 
 /**
- * Insta Kill (and a superseded run, a closed tab, a timed-out request) is a
- * deliberate cancellation, never a crash. Anything that recognises this shape
- * must stop quietly: showing it as an error — or letting it escape as an
- * unhandled rejection — is what blanked the page mid-run.
+ * Insta Kill (and a superseded run, a closed tab) is a deliberate cancellation,
+ * never a crash. Anything that recognises this shape must stop quietly: showing
+ * it as an error — or letting it escape as an unhandled rejection — is what
+ * blanked the page mid-run.
+ *
+ * A request DEADLINE is explicitly not cancellation. Treating it as one meant a
+ * single unanswered request emptied the queue and ended the whole run, which is
+ * the other half of the live freeze: the run did not just stall, it stopped.
  */
 function isCancellation(e: unknown): boolean {
   const err = e as { name?: string; message?: string } | null;
   if (!err) return false;
-  if (err.name === "AbortError" || err.name === "KilledError") return true;
   const msg = typeof err.message === "string" ? err.message : String(e);
-  return /insta kill|killederror|cancell?ed|aborted|the operation was aborted|request timed out/i.test(
-    msg,
-  );
+  if (msg.includes(DEADLINE_MESSAGE)) return false;
+  if (err.name === "AbortError" || err.name === "KilledError") return true;
+  return /insta kill|killederror|cancell?ed|aborted|the operation was aborted/i.test(msg);
 }
 
 /**
