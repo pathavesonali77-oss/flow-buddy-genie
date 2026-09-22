@@ -2466,8 +2466,9 @@ export async function renderPanel(
   // full prompt could not be rendered, not only on an explicit refusal: a free
   // renderer often reports a content block as a plain failure.
   const softened = promptVariant(prompt, 1, line);
-  if (softened && softened !== prompt) {
+  if (softened && softened !== prompt && !outOfTime()) {
     for (let round = 0; round < (refused ? 3 : 2); round++) {
+      if (round > 0 && outOfTime()) break;
       tries++;
       try {
         const url = await generateImage(
@@ -2475,7 +2476,7 @@ export async function renderPanel(
           seed + 5471 + round * 977,
           slot + round,
           bible,
-          3,
+          1,
           line,
           continuity,
           plan,
@@ -2496,11 +2497,12 @@ export async function renderPanel(
     .replace(/\s{2,}/g, " ")
     .trim()
     .slice(0, 900);
-  if (plain.length >= 20) {
+  if (plain.length >= 20 && !outOfTime()) {
     for (let round = 0; round < 3; round++) {
+      if (round > 0 && outOfTime()) break;
       tries++;
       try {
-        const url = await generateImage(plain, seed + 9109 + round * 613, slot + round, bible, 3, line, continuity, plan);
+        const url = await generateImage(plain, seed + 9109 + round * 613, slot + round, bible, 1, line, continuity, plan);
         return { url, prompt: plain, level: 2, tries, rewritten };
       } catch (e) {
         if (e instanceof KilledError) throw e;
