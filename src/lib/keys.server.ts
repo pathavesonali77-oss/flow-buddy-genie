@@ -96,6 +96,8 @@ export function releaseAllImageKeys(): void {
   restingUntil.clear();
 }
 
+registerKillHook(releaseAllImageKeys);
+
 /**
  * Picks a key and runs the request on it — immediately, always.
  *
