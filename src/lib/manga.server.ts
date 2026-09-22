@@ -12,10 +12,24 @@ import { assertActive, killableSignal, KilledError } from "./kill-switch.server"
 /** The ONLY image provider and model in this app. */
 const AGNES_URL = "https://apihub.agnes-ai.com/v1/images/generations";
 const AGNES_IMAGE_MODEL = "agnes-image-2.5-flash";
-// Generation can legitimately take minutes when the renderer is busy. A short
-// deadline used to kill healthy renders at 60s and made long runs look stuck,
-// so this is only a very generous safety net, never a fast-fail.
-const IMAGE_REQUEST_TIMEOUT_MS = 180_000;
+// One upstream image call. Measured against the real provider a render answers
+// in 9-17s, so 55s is already many times the normal time. It must stay well
+// under the live host's connection ceiling: a server call that outlives the
+// connection is dropped by the edge with no answer ever reaching the page,
+// which is exactly what made live runs freeze after a handful of panels.
+const IMAGE_REQUEST_TIMEOUT_MS = 55_000;
+/**
+ * Total time ONE renderPanel server call may spend before it gives up and
+ * reports a plain failure.
+ *
+ * Retrying belongs to the browser, not to a single live request. The retry
+ * ladder below used to run up to nine 180s upstream calls inside one request
+ * (tens of minutes); live hosting severed that connection long before it
+ * answered, and the page — which waited with no deadline of its own — hung
+ * forever on a reply that could never arrive. A short budget turns that hang
+ * into a fast, visible failure that the browser simply queues again.
+ */
+const RENDER_BUDGET_MS = 110_000;
 
 /**
  * Renderer-only art direction. The writing model describes only scene content;
